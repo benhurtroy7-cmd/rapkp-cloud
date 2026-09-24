@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: rapkp-v26
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: RAPKP_TOKEN
+        value: KVYezIWxlkS6bwKDAi4i1pT3l7PLNvO2
