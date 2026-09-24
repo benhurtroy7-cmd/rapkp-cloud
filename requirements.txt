@@ -1,0 +1,4 @@
+skyfield>=1.49
+numpy>=1.24
+reportlab>=4.0
+pypdf>=4.0
