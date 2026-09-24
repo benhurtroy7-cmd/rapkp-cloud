@@ -4,6 +4,9 @@ services:
     runtime: docker
     plan: free
     autoDeploy: true
+    healthCheckPath: /health
     envVars:
       - key: RAPKP_TOKEN
         value: KVYezIWxlkS6bwKDAi4i1pT3l7PLNvO2
+      - key: PORT
+        value: "8000"
