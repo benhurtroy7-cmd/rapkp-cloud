@@ -464,6 +464,29 @@ def probability_from_score(score, floor=6.0, ceil=78.0):
     return round(floor + (ceil - floor) * (x ** 1.35), 1)
 
 # ---------------------------------------------------------------- correction learning
+def _corr_norm_text(x):
+    import re
+    t = str(x or '').lower()
+    # user correction: flat 302 / flat no 302 / flat number 302 should be treated as flat
+    t = re.sub(r'\bflat\s*(?:no\.?|number)?\s*302\b', 'flat', t)
+    t = re.sub(r'[^a-z0-9]+', ' ', t).strip()
+    return t
+
+def _correction_matches(c, query, dkey):
+    qn = _corr_norm_text(query)
+    cq = _corr_norm_text(c.get('query') or c.get('title') or '')
+    cd = _corr_norm_text(c.get('domain') or c.get('rule_type') or '')
+    cn = _corr_norm_text(c.get('note') or c.get('rule') or '')
+    dk = _corr_norm_text(dkey)
+    if cq and (cq == qn or cq in qn or qn in cq):
+        return True
+    if cd and dk and cd == dk:
+        return True
+    # property alias: flat 302 correction should match any flat/property query
+    if ('flat' in qn or dk == 'property') and ('flat' in cq or 'flat' in cn or cd == 'property'):
+        return True
+    return False
+
 def learned_rule(query, corrections):
     """
     Runtime cloud rules / corrections interpreter.
@@ -489,7 +512,7 @@ def learned_rule(query, corrections):
         domain_hints=[
             ("travel", ("visa","foreign","abroad","passport","overseas")),
             ("career", ("job","career","promotion","salary","offer")),
-            ("property", ("flat","house","property","handover","possession")),
+            ("property", ("flat","302","house","property","handover","possession")),
             ("health", ("health","surgery","medical","hospital","recovery")),
             ("litigation", ("court","case","legal","police","litigation")),
             ("finance", ("money","loan","wealth","debt","income")),
@@ -500,9 +523,12 @@ def learned_rule(query, corrections):
         for dom, words in domain_hints:
             if any(w in q for w in words) and any(w in txt for w in words):
                 forced_domain=dom; applied.append(dom+" rule")
-        # Note-only marker for exact query corrections
+        # Direct flat/property alias correction: flat 302 -> flat/property
+        if _correction_matches(c, query, 'property') and ('flat' in q or '302' in q or 'property' in q):
+            forced_domain='property'; applied.append('flat/property correction')
+        # Note-only marker for exact/fuzzy query corrections
         cq = str(c.get("query") or c.get("title") or "").lower().strip()
-        if cq and (cq in q or q in cq):
+        if _correction_matches(c, query, forced_domain or '') or (cq and (cq in q or q in cq)):
             applied.append("saved correction: "+cq[:40])
     if forced_domain:
         return dict(domain=forced_domain, note="Cloud rule applied ✓ — "+", ".join(dict.fromkeys(applied)))
@@ -643,8 +669,7 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
     # ---- correction override (user-corrected answers win)
     corr_note = None
     for c in (corrections or []):
-        if (c.get("domain") == dkey or c.get("query", "").lower() == query.lower()) \
-           and c.get("correct_date"):
+        if _correction_matches(c, query, dkey) and c.get("correct_date"):
             best_jd = jd_of(datetime.strptime(c["correct_date"] + " " +
                                               (c.get("correct_time") or "12:00"),
                                               "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)

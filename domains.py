@@ -78,10 +78,10 @@ DOMAINS = {
           "refund", "maturity", "fd", "deposit", "arrears", "pension", "pf"]),
 
  "property": dict(
-    label="Property / House / Vehicle",
+    label="Property / Flat / House / Vehicle",
     primary=[4, 11, 12], support=[2, 9], avoid=[6, 8],
     karakas=["Mars", "Venus", "Saturn"],
-    keys=["flat", "flat 302", "handover", "house", "home", "property", "plot",
+    keys=["flat", "flat 302", "302", "handover", "house", "home", "property", "plot",
           "land", "site", "registration", "registry", "possession", "apartment",
           "villa", "construction", "renovation", "vehicle", "car", "bike",
           "buy car", "buy house", "griha pravesh", "house warming", "rent",
