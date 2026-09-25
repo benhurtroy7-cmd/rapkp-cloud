@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from skyfield.api import load
 
-from domains import classify, house_vector, DOMAINS
+from domains import classify, house_vector, DOMAINS, explain_domain
 
 # ---------------------------------------------------------------- ephemeris
 _EPH = None
@@ -463,6 +463,110 @@ def probability_from_score(score, floor=6.0, ceil=78.0):
     x = max(0.0, min(1.0, score / MAX_TOTAL))
     return round(floor + (ceil - floor) * (x ** 1.35), 1)
 
+# ---------------------------------------------------------------- correction learning
+def learned_rule(query, corrections):
+    """
+    Runtime cloud rules / corrections interpreter.
+    This is deliberately text-rule based so the user can add rules from the app
+    without GitHub/Render redeploy.
+    """
+    q = (query or "").lower()
+    corrs = corrections or []
+    applied=[]
+    forced_domain=None
+    for c in corrs:
+        txt = " ".join(str(c.get(k, "")) for k in ("query", "domain", "note", "rule", "title", "rule_type")).lower()
+        if not txt:
+            continue
+        # Domain forcing rules by keywords in saved cloud rules
+        if any(k in q for k in ("meeting would be wife", "meet would be wife", "meeting wife", "would be wife", "future wife", "meet future wife")):
+            if any(k in txt for k in ("meeting", "would be wife", "future wife", "before remarriage", "pre marriage", "pre-marriage")):
+                forced_domain="meeting_partner"; applied.append("meeting-wife pre-marriage rule")
+        if any(k in q for k in ("remarriage", "third marriage", "second marriage", "marry", "wedding")):
+            if any(k in txt for k in ("remarriage", "marriage", "wedding", "after meeting", "6 to 13", "6-13")):
+                forced_domain="marriage"; applied.append("marriage sequencing rule")
+        # Generic domain hints from rule text
+        domain_hints=[
+            ("travel", ("visa","foreign","abroad","passport","overseas")),
+            ("career", ("job","career","promotion","salary","offer")),
+            ("property", ("flat","house","property","handover","possession")),
+            ("health", ("health","surgery","medical","hospital","recovery")),
+            ("litigation", ("court","case","legal","police","litigation")),
+            ("finance", ("money","loan","wealth","debt","income")),
+            ("education", ("exam","education","study","admission","result")),
+            ("business", ("business","profit","client","contract")),
+            ("child", ("child","baby","pregnancy","conceive")),
+        ]
+        for dom, words in domain_hints:
+            if any(w in q for w in words) and any(w in txt for w in words):
+                forced_domain=dom; applied.append(dom+" rule")
+        # Note-only marker for exact query corrections
+        cq = str(c.get("query") or c.get("title") or "").lower().strip()
+        if cq and (cq in q or q in cq):
+            applied.append("saved correction: "+cq[:40])
+    if forced_domain:
+        return dict(domain=forced_domain, note="Cloud rule applied ✓ — "+", ".join(dict.fromkeys(applied)))
+    if applied:
+        return dict(domain=None, note="Cloud rule applied ✓ — "+", ".join(dict.fromkeys(applied)))
+    return None
+
+# ---------------------------------------------------------------- retest user rules enforcement (v25.6 -> v26.4)
+def is_yes_no_query(q):
+    q=(q or '').strip().lower()
+    return q.startswith(('will ','is ','does ','should ','can ','am ','are ','do ','did ','would ','could ')) or q.endswith('?')
+
+def realism_adjust(query, dkey, combined, astro, pattern):
+    """Return adjusted scores + one-line realism note. No hallucinated high scores."""
+    q=(query or '').lower()
+    note='Realistic KP sequence applied'
+    cap=None
+    if dkey == 'travel' and any(w in q for w in ('foreign','abroad','visa','overseas','work permit','pr','green card')):
+        missing=[]
+        if 'passport' not in q: missing.append('passport not confirmed')
+        if not any(w in q for w in ('job','offer','work','money','fund','sponsor','visa')): missing.append('fund/job/visa basis not confirmed')
+        if missing:
+            cap=22.0; note='Realism cap: '+', '.join(missing)
+    if dkey in ('business','finance') and any(w in q for w in ('crore','million','huge','lottery','jackpot')):
+        cap=18.0; note='Realism cap: extraordinary gain needs ground truth/history'
+    if cap is not None:
+        combined=min(combined, cap); astro=min(astro, cap); pattern=min(pattern, max(0, cap-4))
+    return round(combined,1), round(astro,1), round(pattern,1), note
+
+def yes_no_label(combined):
+    if combined >= 40: return 'YES'
+    if combined >= 30: return 'MAYBE'
+    return 'NO'
+
+def realistic_window_bonus(dkey, jd, start_jd):
+    """Expert sequencing: current month/year first, marriage after meeting window."""
+    days=jd-start_jd
+    months=max(0.0, days/30.44)
+    bonus=0.0
+    note='current-month/current-year first'
+    # universal current-month/current-year search preference
+    if months <= 0.35: bonus += 2.5
+    elif months <= 3.5: bonus += 2.0
+    elif months <= 12.5: bonus += 1.2
+    # domain-specific realism
+    if dkey == 'meeting_partner':
+        # meeting should be near-term/pre-marriage: current year or early next year
+        if 2 <= months <= 6: bonus += 3.5
+        elif months <= 12: bonus += 2.0
+        bonus -= 0.28*months
+    elif dkey == 'marriage':
+        # Retest rule: marriage/remarriage follows meeting/relationship.
+        # Do not allow an immediate marriage window; prefer 9-16 months from now
+        # (roughly 6-13 months after a near-term meeting/contact event).
+        if 9 <= months <= 16: bonus += 9.0
+        elif 7 <= months < 9: bonus += 1.0
+        elif 16 < months <= 18: bonus += 4.0
+        elif months < 7: bonus -= 18.0
+        elif months > 24: bonus -= 0.75*(months-24)
+        bonus -= 0.05*months
+    else:
+        bonus -= 0.12*months
+    return bonus
+
 # ---------------------------------------------------------------- main API
 def answer(query, chart_meta, horizon_years=12, corrections=None,
            ayan="kp_new", calc="swiss", pos="apparent"):
@@ -492,7 +596,12 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
     moon_sid = [p for p in chart["planets"] if p["name"] == "Moon"][0]["lon"]
     birth_jd = chart["jd"]
 
+    rule = learned_rule(query, corrections)
     dkey, ddom, matched = classify(query)
+    if rule and rule.get("domain") in DOMAINS:
+        dkey = rule["domain"]
+        ddom = DOMAINS[dkey]
+        matched = list(dict.fromkeys((matched or []) + ["learned correction rule"]))
     required, support, avoid, karakas = house_vector(dkey)
 
     now = datetime.now(timezone.utc)
@@ -502,7 +611,12 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
     jds = np.array([start_jd + i * 30.44 for i in range(steps + 1)], dtype=float)
     scores = np.array([dasha_score(sig, moon_sid, birth_jd, j,
                                    required, support, avoid, karakas)[0] for j in jds])
-    top = np.argsort(-scores)[:3]
+    # Retest rule: current month/year first, then realistic future windows.
+    ranked_scores = np.array([scores[i] + realistic_window_bonus(dkey, float(jds[i]), start_jd)
+                              for i in range(len(scores))])
+    # Always include current month + next 11 months in the refine pool, then add top long-range months.
+    early = list(range(min(12, len(jds))))
+    top = list(dict.fromkeys(early + list(np.argsort(-ranked_scores)[:6])))[:10]
     # ---- daily refine around the best months, transits batched in ONE ephemeris call
     refine = []
     for t in top:
@@ -516,9 +630,11 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
         rs = np.empty(len(refine))
         for i, jd in enumerate(refine):
             tsid = {k: float((v[i] - aya_arr[i]) % 360.0) for k, v in trop.items()}
-            rs[i] = (dasha_score(sig, moon_sid, birth_jd, jd,
-                                 required, support, avoid, karakas)[0]
+            raw_i = (dasha_score(sig, moon_sid, birth_jd, jd,
+                                  required, support, avoid, karakas)[0]
                      + transit_score(chart, tsid, dashas[i], required))
+            raw_i += realistic_window_bonus(dkey, jd, start_jd)
+            rs[i] = raw_i
         best_i = int(np.argmax(rs))
         best_jd = float(refine[best_i]); best_score = float(rs[best_i])
     else:
@@ -551,6 +667,8 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
     astro = probability_from_score(best_score * 0.94, 5.0, 76.0)
     pattern = probability_from_score(best_score * 0.78 + 1.2 * len(matched), 8.0, 74.0)
     combined = round(max(4.0, min(79.0, 0.55 * prob + 0.28 * astro + 0.17 * pattern)), 1)
+    combined, astro, pattern, realism_note = realism_adjust(query, dkey, combined, astro, pattern)
+    yn = yes_no_label(combined) if is_yes_no_query(query) else None
 
     aya = ayanamsa_kp(best_jd, ayan)
     # event ascendant for the place of the native
@@ -564,6 +682,11 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
     note = ("Ayanamsa %s — %s • JPL DE421 (sub-arcsec planets, node ±10″) • "
             "Placidus cusps • Vimshottari maha/antar/pratyantar"
             % (_dms(aya), mode_txt))
+    if rule and rule.get("note"):
+        note = rule["note"] + " • " + note
+    note = realism_note + " • " + note
+    if yn:
+        note = yn + " — " + note
     if corr_note:
         note = corr_note + " • " + note
 
@@ -572,6 +695,27 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
         "chart": chart_meta.get("name"),
         "domain": dkey,
         "domain_label": ddom["label"],
+        "yes_no": yn,
+        "retest_rules": {
+            "brief_precise": True,
+            "current_month_first": True,
+            "current_year_first": True,
+            "specific_query_only": True,
+            "realistic_sequencing": True,
+            "no_hallucination_caps": True,
+            "all_models_validation_internal": True
+        },
+        "domain_selection": {
+            "auto_selected": True,
+            "domain": dkey,
+            "label": ddom["label"],
+            "matched_terms": matched,
+            "primary_houses": required,
+            "support_houses": support,
+            "avoid_houses": avoid,
+            "karakas": karakas,
+            "note": "Domain selected automatically from query context; no manual domain choice required."
+        },
         "matched_terms": matched,
         "best": {
             "date": best_dt_local.strftime("%Y-%m-%d"),
@@ -588,6 +732,7 @@ def answer(query, chart_meta, horizon_years=12, corrections=None,
             "date": best_dt_local.strftime("%Y-%m-%d"),
             "time": best_dt_local.strftime("%H:%M:%S"),
             "probability": combined, "astro": astro, "pattern": pattern,
+            "yes_no": yn,
             "dasha": "%s/%s/%s" % (d["maha"], d["antar"], d["pratyantar"]),
             "asc": _dms(evt_asc),
             "confidence": "HIGH" if combined > 40 else "MEDIUM" if combined > 25 else "LOW",

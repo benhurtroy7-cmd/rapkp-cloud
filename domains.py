@@ -18,13 +18,22 @@ DOMAINS = {
           "third marriage", "marriage date", "when will i marry", "nuptial", "engage",
           "engagement", "match", "rishta", "proposal", "wedding date", "muhurat wedding"]),
 
+ "meeting_partner": dict(
+    label="Meeting Future Spouse / Pre-Marriage Contact",
+    primary=[5, 7, 11], support=[3, 9, 2], avoid=[6, 8, 12],
+    karakas=["Venus", "Moon", "Mercury"],
+    keys=["meeting would be wife", "meet would be wife", "meeting wife",
+          "would be wife", "future wife", "meet my wife", "meet future wife",
+          "when will i meet wife", "when will i meet my wife", "first meeting wife",
+          "meeting spouse", "meet spouse", "partner meeting", "first contact wife"]),
+
  "love": dict(
     label="Love / Relationship",
     primary=[5, 7, 11], support=[2, 9], avoid=[6, 8, 12],
     karakas=["Venus", "Moon", "Mars"],
     keys=["love", "lover", "girlfriend", "boyfriend", "relationship", "romance",
-          "affair", "crush", "meet would be wife", "meeting would be wife", "partner",
-          "dating", "propose", "breakup", "patch up", "reunion"]),
+          "affair", "crush", "partner", "dating", "propose", "breakup",
+          "patch up", "reunion"]),
 
  "divorce": dict(
     label="Separation / Divorce",
@@ -153,6 +162,7 @@ DOMAINS = {
 
 # Any extra phrase that nudges a query into a domain even without an exact key hit
 HINT_MAP = {
+    "meeting_partner": ["meeting wife", "meet wife", "would be wife", "future wife", "meeting spouse"],
     "marriage": ["shaadi", "kalyanam", "vivah", "wedding", "spouse", "bride"],
     "career": ["job", "naukri", "promotion", "career", "salary", "boss"],
     "child": ["baby", "child", "pregnan", "son", "daughter"],
@@ -201,3 +211,19 @@ def classify(query):
 def house_vector(domain_key):
     d = DOMAINS.get(domain_key, DOMAINS["general"])
     return d["primary"], d["support"], d["avoid"], d["karakas"]
+
+
+def explain_domain(query):
+    """Return a user-visible explanation of automatic domain selection."""
+    key, d, matched = classify(query)
+    return {
+        "domain": key,
+        "label": d["label"],
+        "matched_terms": matched,
+        "primary_houses": d["primary"],
+        "support_houses": d["support"],
+        "avoid_houses": d["avoid"],
+        "karakas": d["karakas"],
+        "auto_selected": True,
+        "note": "Domain selected automatically from query context; no manual domain choice required."
+    }

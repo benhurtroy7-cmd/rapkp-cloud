@@ -58,6 +58,9 @@ def init():
         c.execute("""CREATE TABLE IF NOT EXISTS pdf_readings(
             id INTEGER PRIMARY KEY, ts TEXT, filename TEXT, chart TEXT, query TEXT,
             pages INTEGER, chars INTEGER, domain TEXT, answer_date TEXT, probability REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rules(
+            id INTEGER PRIMARY KEY, ts TEXT, title TEXT, rule TEXT, rule_type TEXT,
+            active INTEGER DEFAULT 1, source TEXT, applied_count INTEGER DEFAULT 0)""")
         c.execute("SELECT COUNT(*) n FROM charts")
         if c.execute("SELECT COUNT(*) n FROM charts").fetchone()["n"] == 0:
             _save_chart(DEFAULT_CHART, c)
@@ -85,6 +88,10 @@ def get_chart(selector=None):
                 return row_to_chart(r)
         r = c.execute("SELECT * FROM charts ORDER BY id LIMIT 1").fetchone()
         return row_to_chart(r) if r else DEFAULT_CHART
+
+def active_rules():
+    with _lock, db() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM rules WHERE active=1 ORDER BY id DESC LIMIT 300")]
 
 def log(msg):
     line = "[%s] %s" % (datetime.now(timezone.utc).isoformat(timespec="seconds"), msg)
@@ -220,6 +227,10 @@ class H(BaseHTTPRequestHandler):
                     rows = [dict(r) for r in c.execute(
                         "SELECT * FROM corrections WHERE applied=1 ORDER BY id DESC LIMIT 200")]
                 return self._json(dict(corrections=rows, count=len(rows)))
+            if p == "/api/rules":
+                self._need_token(q)
+                rows = active_rules()
+                return self._json(dict(rules=rows, count=len(rows), note="Rules are applied automatically on every prediction."))
             return self._json(dict(error="not found", path=p), 404)
         except PermissionError:
             return self._json(dict(error="forbidden — invalid token"), 403)
@@ -355,10 +366,13 @@ class H(BaseHTTPRequestHandler):
                 with _lock, db() as c:
                     corrs = [dict(r) for r in c.execute(
                         "SELECT * FROM corrections WHERE applied=1 ORDER BY id DESC LIMIT 200")]
-                res = E.answer(combined_q, ch, corrections=corrs,
+                rules = active_rules()
+                rule_corrs = [dict(query=r.get("title") or "", note=r.get("rule") or "", domain=r.get("rule_type") or "", source="cloud_rule", ts=r.get("ts")) for r in rules]
+                res = E.answer(combined_q, ch, corrections=corrs + rule_corrs,
                                ayan=body.get("ayan") or "kp_new",
                                calc=body.get("calc") or "swiss",
                                pos=body.get("pos") or "apparent")
+                res["cloud_rules_applied"] = [r.get("title") or r.get("rule")[:60] for r in rules[:12]]
                 # Add a document-aware reading block. Keep the original presentable shape intact.
                 key_lines = []
                 for line in text.splitlines():
@@ -383,6 +397,20 @@ class H(BaseHTTPRequestHandler):
                 log("PDF READING %s chart=%s pages=%s chars=%s -> %s" %
                     (filename[:60], ch.get("name"), len(reader.pages), len(text), res.get("domain")))
                 return self._json(res)
+
+            if p == "/api/rules":
+                self._need_token(q)
+                rule = (body.get("rule") or body.get("note") or "").strip()
+                title = (body.get("title") or body.get("query") or rule[:60] or "Rule").strip()
+                rtype = (body.get("rule_type") or body.get("domain") or "auto").strip()
+                if not rule:
+                    return self._json(dict(error="rule required"), 400)
+                with _lock, db() as c:
+                    c.execute("INSERT INTO rules(ts,title,rule,rule_type,active,source) VALUES(?,?,?,?,1,?)",
+                              (datetime.now(timezone.utc).isoformat(), title, rule, rtype, body.get("source") or "app"))
+                    rid = c.execute("SELECT last_insert_rowid() id").fetchone()["id"]
+                log("RULE #%s saved: %s -> %s" % (rid, title[:50], rule[:120]))
+                return self._json(dict(ok=True, id=rid, msg="Rule saved — cloud will apply automatically ✓"))
 
             if p == "/api/correction":
                 self._need_token(q)
