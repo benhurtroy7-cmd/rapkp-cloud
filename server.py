@@ -13,7 +13,7 @@ Token-gated KP astrology engine for the native Android app.
   GET  /api/corrections?token=...                     -> list corrections
   GET  /health                                        -> liveness
 """
-import base64, io, json, os, sqlite3, threading, time, traceback
+import base64, io, json, os, sqlite3, threading, time, traceback, re, urllib.request
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -29,6 +29,11 @@ DB = os.path.join(DATA, "rapkp.db")
 LOG = os.path.join(DATA, "mit_server.log")
 PORT = int(os.environ.get("PORT", "8000"))
 TOKEN = os.environ.get("RAPKP_TOKEN", "KVYezIWxlkS6bwKDAi4i1pT3l7PLNvO2")
+# v30 optional AI gate. No key required: safe rule-based fallback is always active.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "").strip().rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b").strip()
 DEFAULT_CHART = dict(name="Venkat Kalyan", dob="1971-01-23", tob="09:53",
                      lat=13.05705, lon=80.20982, tz=5.5,
                      place="Chennai, India", relation="self")
@@ -61,6 +66,8 @@ def init():
         c.execute("""CREATE TABLE IF NOT EXISTS rules(
             id INTEGER PRIMARY KEY, ts TEXT, title TEXT, rule TEXT, rule_type TEXT,
             active INTEGER DEFAULT 1, source TEXT, applied_count INTEGER DEFAULT 0)""")
+        # v29.4 safety: old empty-query note-only corrections were bug notes, not valid learning.
+        c.execute("UPDATE corrections SET applied=0 WHERE (query IS NULL OR trim(query)='') AND (correct_date IS NULL OR trim(correct_date)='')")
         c.execute("SELECT COUNT(*) n FROM charts")
         if c.execute("SELECT COUNT(*) n FROM charts").fetchone()["n"] == 0:
             _save_chart(DEFAULT_CHART, c)
@@ -101,6 +108,101 @@ def log(msg):
             f.write(line + "\n")
     except Exception:
         pass
+
+# ------------------------------------------------------------------ v30 AI intent gate
+DOMAIN_WORDS = {
+    "marriage": ("marriage", "remarriage", "wife", "husband", "spouse", "wedding"),
+    "property": ("flat", "302", "house", "property", "plot", "land", "handover", "possession", "registration"),
+    "career": ("job", "career", "promotion", "work", "business", "client", "salary"),
+    "health": ("health", "surgery", "medical", "hospital", "disease", "recovery"),
+    "travel": ("visa", "foreign", "abroad", "travel", "passport", "onsite"),
+    "finance": ("money", "loan", "wealth", "income", "debt", "profit", "finance"),
+    "education": ("exam", "education", "study", "admission", "result"),
+    "litigation": ("court", "case", "legal", "police", "litigation"),
+}
+
+def _extract_json(txt):
+    txt = (txt or "").strip()
+    m = re.search(r"\{.*\}", txt, re.S)
+    if not m:
+        raise ValueError("no json in model output")
+    return json.loads(m.group(0))
+
+def local_intent_gate(query, chart=None, filename="", context="ask"):
+    q = " ".join(str(query or "").split()).strip()
+    low = q.lower()
+    fname = str(filename or "")
+    neutral_pdf = low.startswith("read this pdf") or ("chart-specific prediction summary" in low)
+    vague = (not q) or neutral_pdf or low in ("general", "prediction", "predict", "chart", "read chart", "read pdf")
+    domain = "general"
+    matched=[]
+    for d, words in DOMAIN_WORDS.items():
+        hits=[w for w in words if w in low]
+        if hits:
+            domain=d; matched=hits; break
+    is_question = any(w in low for w in ("when", "will", "can", "is", "are", "should", "timing", "date", "happen", "get", "meet")) or bool(matched)
+    if vague or not is_question:
+        return dict(ok=True, provider="local-intent-gate", should_predict=False,
+                    needs_clarification=True, domain="none", normalized_query=q,
+                    reason="No specific predictive question found. Loading a chart/PDF alone must not create event timing.",
+                    ask_user="Please type a specific question, e.g. 'Mydhili marriage timing', 'Mydhili health issue', 'Mydhili career', or 'Mydhili property matter'.")
+    # Normalize flat 302 safely
+    normalized = re.sub(r"\bflat\s*(?:no\.?|number)?\s*302\b", "flat", q, flags=re.I)
+    return dict(ok=True, provider="local-intent-gate", should_predict=True,
+                needs_clarification=False, domain=domain, matched_terms=matched,
+                normalized_query=normalized, reason="Specific predictive question detected.")
+
+def gemini_intent_gate(query, chart=None, filename="", context="ask"):
+    if not GEMINI_API_KEY:
+        return None
+    prompt = f"""You are an astrology product intent gate, not the astrologer.
+Decide if the user text is a specific predictive question. Loading a PDF/chart alone is NOT a prediction request.
+Never invent an event. If vague, block and ask clarification.
+Return JSON only with keys: should_predict boolean, needs_clarification boolean, domain string, normalized_query string, reason string, ask_user string.
+Domains: marriage, property, career, health, travel, finance, education, litigation, child, meeting_partner, general.
+User text: {query!r}
+PDF/chart filename: {filename!r}
+Context: {context!r}
+"""
+    url = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s" % (GEMINI_MODEL, GEMINI_API_KEY)
+    payload = {"contents":[{"parts":[{"text":prompt}]}], "generationConfig":{"temperature":0.05, "maxOutputTokens":512}}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type":"application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=18) as r:
+        j=json.loads(r.read().decode("utf-8","replace"))
+    txt = j.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    out = _extract_json(txt)
+    out["provider"] = "google-gemini"
+    out["ok"] = True
+    return out
+
+def ollama_intent_gate(query, chart=None, filename="", context="ask"):
+    if not OLLAMA_URL:
+        return None
+    prompt = "Return JSON only. Is this a specific astrology predictive question? Block vague PDF/chart load. Text=%r filename=%r" % (query, filename)
+    payload={"model":OLLAMA_MODEL,"prompt":prompt,"stream":False,"options":{"temperature":0.05}}
+    req=urllib.request.Request(OLLAMA_URL+"/api/generate", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=20) as r:
+        j=json.loads(r.read().decode("utf-8","replace"))
+    out=_extract_json(j.get("response", ""))
+    out["provider"]="ollama-open-source"
+    out["ok"]=True
+    return out
+
+def ai_intent_gate(query, chart=None, filename="", context="ask"):
+    # Try Gemini, then open-source/Ollama, then deterministic safe fallback.
+    for fn in (gemini_intent_gate, ollama_intent_gate):
+        try:
+            out = fn(query, chart, filename, context)
+            if out:
+                # Safety override: model cannot allow neutral PDF summary as event timing.
+                local = local_intent_gate(query, chart, filename, context)
+                if not local.get("should_predict"):
+                    local["provider"] = out.get("provider", "ai") + "+local-safety"
+                    return local
+                return out
+        except Exception as ex:
+            log("AI intent gate fallback: %s" % str(ex)[:160])
+    return local_intent_gate(query, chart, filename, context)
 
 # ------------------------------------------------------------------ handler
 class H(BaseHTTPRequestHandler):
@@ -206,7 +308,12 @@ class H(BaseHTTPRequestHandler):
             if p == "/health":
                 return self._json(dict(ok=True, service="RAPKP v26 Cloud",
                                        time=datetime.now(timezone.utc).isoformat(),
-                                       engine="MIT openephem DE421/Skyfield"))
+                                       engine="MIT openephem DE421/Skyfield", ai_gate=("gemini" if GEMINI_API_KEY else ("ollama" if OLLAMA_URL else "local"))))
+            if p == "/api/intent-gate":
+                self._need_token(q)
+                query=(q.get("query") or [""])[0]
+                filename=(q.get("filename") or [""])[0]
+                return self._json(ai_intent_gate(query, filename=filename, context="get"))
             if p == "/api/ask":
                 return self._ask(q)
             if p == "/api/charts":
@@ -262,6 +369,11 @@ class H(BaseHTTPRequestHandler):
         query = (q.get("query") or [""])[0].strip()
         if not query:
             return self._json(dict(error="empty query"), 400)
+        gate = ai_intent_gate(query, context="ask")
+        if not gate.get("should_predict"):
+            return self._json(dict(error="specific query required", intent_gate=gate,
+                                   msg=gate.get("ask_user") or gate.get("reason")), 409)
+        query = gate.get("normalized_query") or query
         # chart selection: saved chart by name/id, or ad-hoc birth data in the URL
         sel = (q.get("chart") or [""])[0]
         if (q.get("dob") or [""])[0]:
@@ -281,6 +393,7 @@ class H(BaseHTTPRequestHandler):
         pos = (q.get("pos") or ["apparent"])[0]
         t0 = time.time()
         res = E.answer(query, ch, corrections=corrs, ayan=ayan, calc=calc, pos=pos)
+        res["intent_gate"] = gate
         ms = int((time.time() - t0) * 1000)
         res["server_ms"] = ms
         res["token_ok"] = True
@@ -309,6 +422,9 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             body = {}
         try:
+            if p == "/api/intent-gate":
+                self._need_token(q)
+                return self._json(ai_intent_gate(body.get("query") or "", filename=body.get("filename") or "", context=body.get("context") or "post"))
             if p == "/api/charts":
                 self._need_token(q)
                 if not body.get("name") or not body.get("dob"):
@@ -330,7 +446,7 @@ class H(BaseHTTPRequestHandler):
                                body.get("context", ""), body.get("engine", ""), "open"))
                 log("BUG: %s | %s" % (str(body.get("query"))[:60],
                                       str(body.get("error"))[:120]))
-                return self._json(dict(ok=True, logged=True))
+                return self._json(dict(ok=True, logged=True, msg='Bug report logged. This does not auto-change predictions; use Correction with query/date or Rules to teach engine.'))
 
             if p == "/api/pdf-reading":
                 self._need_token(q)
@@ -353,7 +469,16 @@ class H(BaseHTTPRequestHandler):
                         pages_text.append("")
                 text = "\n\n".join(pages_text).strip()
                 preview = text[:6000]
-                user_q = (body.get("query") or "Read this PDF attachment and give astrology prediction based on the attached document").strip()
+                user_q = (body.get("query") or "").strip()
+                if body.get("pdf_safety") and not body.get("explicit_query"):
+                    return self._json(dict(error="specific query required before PDF prediction", mode="pdf_loaded_no_prediction", filename=filename,
+                                           msg="PDF/chart loaded. Type a specific question before prediction."), 409)
+                gate = ai_intent_gate(user_q, filename=filename, context="pdf")
+                if (not user_q) or user_q.lower().startswith("read this pdf chart for") or not gate.get("should_predict"):
+                    return self._json(dict(error="specific query required before PDF prediction", mode="pdf_loaded_no_prediction", filename=filename,
+                                           intent_gate=gate,
+                                           msg=gate.get("ask_user") or "PDF/chart loaded. Type a specific question before prediction."), 409)
+                user_q = gate.get("normalized_query") or user_q
                 combined_q = (user_q + "\n\nPDF attachment context:\n" + preview[:1800]).strip()
                 chart_sel = body.get("chart") or ""
                 if body.get("dob"):
@@ -373,6 +498,7 @@ class H(BaseHTTPRequestHandler):
                                calc=body.get("calc") or "swiss",
                                pos=body.get("pos") or "apparent")
                 res["cloud_rules_applied"] = [r.get("title") or r.get("rule")[:60] for r in rules[:12]]
+                res["intent_gate"] = gate
                 # Add a document-aware reading block. Keep the original presentable shape intact.
                 key_lines = []
                 for line in text.splitlines():
@@ -416,6 +542,8 @@ class H(BaseHTTPRequestHandler):
                 self._need_token(q)
                 if not body.get("correct_date") and not body.get("note"):
                     return self._json(dict(error="correct_date or note required"), 400)
+                if not str(body.get("query") or "").strip() and not str(body.get("correct_date") or "").strip():
+                    return self._json(dict(error="query required for note-only correction; bug reports do not auto-change predictions"), 400)
                 with _lock, db() as c:
                     c.execute("""INSERT INTO corrections(ts,query,domain,chart,
                                  correct_date,correct_time,note,applied)

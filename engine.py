@@ -480,7 +480,8 @@ def _correction_matches(c, query, dkey):
     dk = _corr_norm_text(dkey)
     if cq and (cq == qn or cq in qn or qn in cq):
         return True
-    if cd and dk and cd == dk:
+    # Domain-only match is allowed only when correction has a concrete date or query/rule scope.
+    if cd and dk and cd == dk and (cq or c.get('correct_date') or c.get('rule') or c.get('title')):
         return True
     # property alias: flat 302 correction should match any flat/property query
     if ('flat' in qn or dk == 'property') and ('flat' in cq or 'flat' in cn or cd == 'property'):
@@ -498,6 +499,12 @@ def learned_rule(query, corrections):
     applied=[]
     forced_domain=None
     for c in corrs:
+        # v29.3: a bug/note-only correction with empty query must not change future predictions broadly.
+        # It is a log unless it has a query/title/rule or an actual corrected date.
+        has_scope = bool(str(c.get('query') or c.get('title') or c.get('rule') or '').strip())
+        has_date = bool(str(c.get('correct_date') or '').strip())
+        if not has_scope and not has_date:
+            continue
         txt = " ".join(str(c.get(k, "")) for k in ("query", "domain", "note", "rule", "title", "rule_type")).lower()
         if not txt:
             continue
