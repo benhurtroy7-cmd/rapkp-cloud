@@ -86,6 +86,43 @@ def row_to_chart(r):
     return dict(id=r["id"], name=r["name"], dob=r["dob"], tob=r["tob"], lat=r["lat"],
                 lon=r["lon"], tz=r["tz"], place=r["place"], relation=r["relation"])
 
+PERSON_STOPWORDS = set(['i', 'me', 'my', 'mine', 'myself', 'you', 'your', 'yours', 'he', 'she', 'they', 'we', 'us', 'when', 'will', 'can', 'should', 'is', 'are', 'am', 'do', 'does', 'did', 'would', 'could', 'may', 'timing', 'date', 'event', 'predict', 'prediction', 'marriage', 'remarriage', 'third', 'second', 'first', 'wife', 'husband', 'spouse', 'wedding', 'health', 'career', 'job', 'property', 'flat', 'house', 'plot', 'land', 'visa', 'travel', 'foreign', 'money', 'finance', 'court', 'case', 'legal', 'general', 'read', 'pdf', 'chart', 'for', 'give', 'and', 'the', 'of', 'to', 'in', 'on', 'with', 'from', 'dob', 'birth', 'time', 'issue', 'matter', 'question'])
+
+def _tokens(x):
+    return re.findall(r"[a-z][a-z0-9]{1,}", str(x or '').lower())
+
+def detect_person_chart_mismatch(query, chart):
+    """Block unsafe cross-person predictions: e.g. query says Mydhili but active chart is Venkat."""
+    q = str(query or '')
+    qt = _tokens(q)
+    if not qt:
+        return None
+    chart_name = str((chart or {}).get('name') or '')
+    ct = set(_tokens(chart_name))
+    # Known/saved chart names have highest confidence.
+    known = []
+    try:
+        with _lock, db() as c:
+            known = [str(r['name'] or '') for r in c.execute('SELECT name FROM charts ORDER BY id')]
+    except Exception:
+        known = []
+    qlow=' '.join(qt)
+    for name in known:
+        nt=_tokens(name)
+        if nt and all(t in qt for t in nt[:2] if t) and not set(nt).issubset(ct):
+            return dict(person=name, active_chart=chart_name, reason='query references saved chart/person but active chart is different')
+    # Explicit common alternate spelling / current bug case.
+    for special in ('mydhili','maithili','mythili','mydhilee'):
+        if special in qt and special not in ct:
+            return dict(person=special.title(), active_chart=chart_name, reason='query references another person name')
+    # Generic: if the first meaningful word before a domain question is not in active chart, treat as person name.
+    domain_present = any(w in qt for w in ('marriage','remarriage','wife','husband','health','career','job','property','flat','visa','travel','money','court','education','child'))
+    if domain_present:
+        for t in qt[:4]:
+            if t not in PERSON_STOPWORDS and t not in ct and len(t) >= 4:
+                return dict(person=t.title(), active_chart=chart_name, reason='query appears to name another person before event domain')
+    return None
+
 def get_chart(selector=None):
     with _lock, db() as c:
         if selector:
@@ -385,6 +422,13 @@ class H(BaseHTTPRequestHandler):
                       tz=float((q.get("tz") or [5.5])[0]))
         else:
             ch = get_chart(sel)
+        mismatch = detect_person_chart_mismatch(query, ch)
+        if mismatch:
+            return self._json(dict(error="chart_mismatch", chart_mismatch=True,
+                                   active_chart=ch.get("name"), referenced_person=mismatch.get("person"),
+                                   reason=mismatch.get("reason"),
+                                   msg="Query appears to refer to %s but active chart is %s. Select/save the correct chart first, then ask again." % (mismatch.get("person"), ch.get("name")),
+                                   action="Select or save the referenced person's chart before prediction."), 409)
         with _lock, db() as c:
             corrs = [dict(r) for r in c.execute(
                 "SELECT * FROM corrections WHERE applied=1 ORDER BY id DESC LIMIT 200")]
@@ -488,6 +532,13 @@ class H(BaseHTTPRequestHandler):
                               place=body.get("place") or "")
                 else:
                     ch = get_chart(chart_sel)
+                mismatch = detect_person_chart_mismatch(user_q + " " + filename, ch)
+                if mismatch:
+                    return self._json(dict(error="chart_mismatch", chart_mismatch=True,
+                                           active_chart=ch.get("name"), referenced_person=mismatch.get("person"),
+                                           reason=mismatch.get("reason"), filename=filename,
+                                           msg="PDF/query appears to refer to %s but active chart is %s. Save/select that person's chart first, then ask a specific question." % (mismatch.get("person"), ch.get("name")),
+                                           action="Save/select the PDF person's chart before prediction."), 409)
                 with _lock, db() as c:
                     corrs = [dict(r) for r in c.execute(
                         "SELECT * FROM corrections WHERE applied=1 ORDER BY id DESC LIMIT 200")]
