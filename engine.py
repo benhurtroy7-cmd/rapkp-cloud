@@ -553,7 +553,7 @@ def realism_adjust(query, dkey, combined, astro, pattern):
     q=(query or '').lower()
     note='Realistic KP sequence applied'
     cap=None
-    if dkey == 'travel' and any(w in q for w in ('foreign','abroad','visa','overseas','work permit','pr','green card')):
+    if dkey == 'travel' and any(w in q for w in ('foreign','abroad','visa','overseas','work permit','pr','green card','international')):
         missing=[]
         if 'passport' not in q: missing.append('passport not confirmed')
         if not any(w in q for w in ('job','offer','work','money','fund','sponsor','visa')): missing.append('fund/job/visa basis not confirmed')
@@ -596,6 +596,20 @@ def realistic_window_bonus(dkey, jd, start_jd):
         elif months < 7: bonus -= 18.0
         elif months > 24: bonus -= 0.75*(months-24)
         bonus -= 0.05*months
+    elif dkey == 'local_travel':
+        # local/domestic travel should be nearer-term than foreign migration/visa.
+        if months <= 1.5: bonus += 5.5
+        elif months <= 4: bonus += 3.0
+        elif months <= 8: bonus += 1.0
+        elif months > 12: bonus -= 0.45*(months-12)
+        bonus -= 0.10*months
+    elif dkey == 'travel':
+        # foreign/abroad travel usually needs documentation/funding; do not mirror local travel.
+        if 3 <= months <= 10: bonus += 3.0
+        elif 10 < months <= 18: bonus += 2.0
+        elif months < 2: bonus -= 4.0
+        elif months > 24: bonus -= 0.35*(months-24)
+        bonus -= 0.04*months
     else:
         bonus -= 0.12*months
     return bonus

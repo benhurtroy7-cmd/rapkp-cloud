@@ -146,13 +146,51 @@ def log(msg):
     except Exception:
         pass
 
+
+def add_text_prediction(res):
+    """Add ChatGPT/Gemini-style narrative while keeping deterministic KP calculation."""
+    try:
+        q = res.get("query") or "your question"
+        p = res.get("presentable") or {}
+        b = res.get("best") or {}
+        domain = res.get("domain_label") or res.get("domain") or "event"
+        date = p.get("date") or b.get("date") or "not available"
+        time_s = p.get("time") or b.get("time") or ""
+        prob = p.get("probability") or b.get("combined") or ""
+        conf = p.get("confidence") or "MEDIUM"
+        dasha = p.get("dasha") or b.get("dasha") or ""
+        asc = p.get("asc") or b.get("asc") or ""
+        note = str(b.get("intelligence_note") or "Realistic KP sequence applied")
+        if res.get("domain") == "local_travel":
+            opening = "This is read as a local/domestic travel question, not a foreign/visa matter."
+            caution = "If you meant abroad/visa travel, ask using words like abroad, foreign, visa or overseas."
+        elif res.get("domain") == "travel":
+            opening = "This is read as a foreign/abroad or long-distance travel question."
+            caution = "If you meant only local travel, ask 'local travel' or 'domestic travel' explicitly."
+        else:
+            opening = "I checked the KP timing factors for this specific question."
+            caution = "Treat this as an astrology timing indication, not a guaranteed event."
+        text = (f"{opening}\n\n"
+                f"For '{q}', the stronger timing window is {date}"
+                f"{' at ' + time_s + ' IST' if time_s else ''}. "
+                f"The calculated probability is about {prob}% with {conf} confidence. "
+                f"The running dasha pattern shown is {dasha}, and the event ASC is {asc}.\n\n"
+                f"Why: {note[:260]}.\n\n"
+                f"Summary: watch the period around {date}; use this date as the main KP timing marker, then validate with real-world readiness and follow-up chart context. {caution}")
+        res["text_prediction"] = text
+        res.setdefault("presentable", {})["text_prediction"] = text
+    except Exception:
+        pass
+    return res
+
 # ------------------------------------------------------------------ v30 AI intent gate
 DOMAIN_WORDS = {
     "marriage": ("marriage", "remarriage", "wife", "husband", "spouse", "wedding"),
     "property": ("flat", "302", "house", "property", "plot", "land", "handover", "possession", "registration"),
     "career": ("job", "career", "promotion", "work", "business", "client", "salary"),
     "health": ("health", "surgery", "medical", "hospital", "disease", "recovery"),
-    "travel": ("visa", "foreign", "abroad", "travel", "passport", "onsite"),
+    "local_travel": ("local travel", "domestic", "within india", "short trip", "road trip", "train journey", "bus travel"),
+    "travel": ("visa", "foreign", "abroad", "overseas", "international", "passport", "onsite"),
     "finance": ("money", "loan", "wealth", "income", "debt", "profit", "finance"),
     "education": ("exam", "education", "study", "admission", "result"),
     "litigation": ("court", "case", "legal", "police", "litigation"),
@@ -438,6 +476,7 @@ class H(BaseHTTPRequestHandler):
         t0 = time.time()
         res = E.answer(query, ch, corrections=corrs, ayan=ayan, calc=calc, pos=pos)
         res["intent_gate"] = gate
+        res = add_text_prediction(res)
         ms = int((time.time() - t0) * 1000)
         res["server_ms"] = ms
         res["token_ok"] = True
@@ -550,6 +589,7 @@ class H(BaseHTTPRequestHandler):
                                pos=body.get("pos") or "apparent")
                 res["cloud_rules_applied"] = [r.get("title") or r.get("rule")[:60] for r in rules[:12]]
                 res["intent_gate"] = gate
+                res = add_text_prediction(res)
                 # Add a document-aware reading block. Keep the original presentable shape intact.
                 key_lines = []
                 for line in text.splitlines():

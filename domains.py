@@ -87,6 +87,15 @@ DOMAINS = {
           "buy car", "buy house", "griha pravesh", "house warming", "rent",
           "rental", "tenant", "real estate", "builder", "keys handover"]),
 
+ "local_travel": dict(
+    label="Local / Domestic Travel",
+    primary=[3, 11], support=[4, 9], avoid=[8, 12],
+    karakas=["Moon", "Mercury", "Rahu"],
+    keys=["local travel", "domestic travel", "within india", "within city", "nearby trip",
+          "short trip", "road trip", "train journey", "bus travel", "local journey",
+          "domestic flight", "travel within", "native travel", "intercity travel",
+          "local transfer", "local tour", "trip in india"]),
+
  "travel": dict(
     label="Travel / Foreign / Visa",
     primary=[3, 9, 12], support=[11, 7], avoid=[6, 8],
@@ -167,7 +176,8 @@ HINT_MAP = {
     "career": ["job", "naukri", "promotion", "career", "salary", "boss"],
     "child": ["baby", "child", "pregnan", "son", "daughter"],
     "property": ["flat", "house", "plot", "car", "property", "possession"],
-    "travel": ["abroad", "foreign", "visa", "travel", "flight"],
+    "local_travel": ["local travel", "domestic", "within india", "short trip", "road trip", "train journey"],
+    "travel": ["abroad", "foreign", "visa", "overseas", "international", "flight"],
     "health": ["health", "surgery", "hospital", "illness", "disease", "pain"],
     "litigation": ["court", "case", "police", "legal", "lawyer"],
     "finance": ["money", "loan", "debt", "income", "profit", "wealth"],
