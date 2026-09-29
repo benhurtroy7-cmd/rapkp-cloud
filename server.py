@@ -86,7 +86,7 @@ def row_to_chart(r):
     return dict(id=r["id"], name=r["name"], dob=r["dob"], tob=r["tob"], lat=r["lat"],
                 lon=r["lon"], tz=r["tz"], place=r["place"], relation=r["relation"])
 
-PERSON_STOPWORDS = set(['i', 'me', 'my', 'mine', 'myself', 'you', 'your', 'yours', 'he', 'she', 'they', 'we', 'us', 'when', 'will', 'can', 'should', 'is', 'are', 'am', 'do', 'does', 'did', 'would', 'could', 'may', 'timing', 'date', 'event', 'predict', 'prediction', 'marriage', 'remarriage', 'third', 'second', 'first', 'wife', 'husband', 'spouse', 'wedding', 'health', 'career', 'job', 'property', 'flat', 'house', 'plot', 'land', 'visa', 'travel', 'foreign', 'money', 'finance', 'court', 'case', 'legal', 'general', 'read', 'pdf', 'chart', 'for', 'give', 'and', 'the', 'of', 'to', 'in', 'on', 'with', 'from', 'dob', 'birth', 'time', 'issue', 'matter', 'question'])
+PERSON_STOPWORDS = set(['i', 'me', 'my', 'mine', 'myself', 'you', 'your', 'yours', 'he', 'she', 'they', 'we', 'us', 'when', 'will', 'can', 'should', 'is', 'are', 'am', 'do', 'does', 'did', 'would', 'could', 'may', 'timing', 'date', 'event', 'predict', 'prediction', 'marriage', 'remarriage', 'third', 'second', 'first', 'wife', 'husband', 'spouse', 'wedding', 'health', 'career', 'job', 'property', 'flat', 'house', 'plot', 'land', 'visa', 'travel', 'foreign', 'abroad', 'overseas', 'international', 'local', 'domestic', 'short', 'trip', 'journey', 'train', 'bus', 'flight', 'road', 'within', 'india', 'nearby', 'tour', 'money', 'finance', 'court', 'case', 'legal', 'general', 'read', 'pdf', 'chart', 'for', 'give', 'and', 'the', 'of', 'to', 'in', 'on', 'with', 'from', 'dob', 'birth', 'time', 'issue', 'matter', 'question'])
 
 def _tokens(x):
     return re.findall(r"[a-z][a-z0-9]{1,}", str(x or '').lower())
